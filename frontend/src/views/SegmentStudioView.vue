@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useSegmentStudioStore } from '@/stores/segmentStudio'
+import { useSegmentStudioStore, type ItemStatus } from '@/stores/segmentStudio'
 
 const store = useSegmentStudioStore()
 const { batches, activeBatch } = storeToRefs(store)
@@ -412,9 +412,157 @@ const emptyState = computed(
 
 const submitDisabled = computed(() => processing.value || stagedCount.value === 0)
 
+/** 检测结果列表：超过该数量则分页展示 */
+const RESULT_LIST_PAGINATE_THRESHOLD = 10
+const RESULT_LIST_PAGE_SIZE = 8
+
+const resultListPage = ref(1)
+const resultListJumpDraft = ref(1)
+
+const resultListItems = computed(() => activeBatch.value?.items ?? [])
+const resultListTotalCount = computed(() => resultListItems.value.length)
+
+const resultListUsePagination = computed(
+  () => resultListTotalCount.value > RESULT_LIST_PAGINATE_THRESHOLD,
+)
+
+const resultListTotalPages = computed(() => {
+  const n = resultListTotalCount.value
+  if (n <= RESULT_LIST_PAGINATE_THRESHOLD) return 1
+  return Math.max(1, Math.ceil(n / RESULT_LIST_PAGE_SIZE))
+})
+
+const resultListVisibleItems = computed(() => {
+  const items = resultListItems.value
+  if (!resultListUsePagination.value) return items
+  const start = (resultListPage.value - 1) * RESULT_LIST_PAGE_SIZE
+  return items.slice(start, start + RESULT_LIST_PAGE_SIZE)
+})
+
+const resultListPageNumbers = computed(() =>
+  Array.from({ length: resultListTotalPages.value }, (_, i) => i + 1),
+)
+
+function goResultPage(p: number) {
+  const max = resultListTotalPages.value
+  const n = Math.min(Math.max(1, Math.floor(Number(p))), max)
+  if (!Number.isFinite(n)) return
+  resultListPage.value = n
+}
+
+function goResultPrevPage() {
+  goResultPage(resultListPage.value - 1)
+}
+
+function goResultNextPage() {
+  goResultPage(resultListPage.value + 1)
+}
+
+function commitResultListJump() {
+  const raw = resultListJumpDraft.value
+  const p = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(raw)
+  if (!Number.isFinite(p)) {
+    resultListJumpDraft.value = resultListPage.value
+    return
+  }
+  goResultPage(p)
+  resultListJumpDraft.value = resultListPage.value
+}
+
+watch(resultListPage, (p) => {
+  resultListJumpDraft.value = p
+})
+
+watch(
+  () => activeBatch.value?.id,
+  () => {
+    resultListPage.value = 1
+    resultListJumpDraft.value = 1
+  },
+)
+
+watch([resultListTotalPages, resultListTotalCount], () => {
+  const max = resultListTotalPages.value
+  if (resultListPage.value > max) resultListPage.value = max
+  if (resultListPage.value < 1) resultListPage.value = 1
+  resultListJumpDraft.value = resultListPage.value
+})
+
+/** 结果列表与详情抽屉：当前打开的条目 id */
+const detailItemId = ref<string | null>(null)
+const detailZoomOriginal = ref(1)
+const detailZoomResult = ref(1)
+
+const detailItem = computed(() => {
+  const batch = activeBatch.value
+  const id = detailItemId.value
+  if (!batch || !id) return null
+  return batch.items.find((i) => i.id === id) ?? null
+})
+
+function statusLabel(status: ItemStatus): string {
+  switch (status) {
+    case 'pending':
+      return '等待'
+    case 'running':
+      return '处理中'
+    case 'done':
+      return '成功'
+    case 'error':
+      return '失败'
+    default:
+      return status
+  }
+}
+
+function openDetail(itemId: string) {
+  detailItemId.value = itemId
+  detailZoomOriginal.value = 1
+  detailZoomResult.value = 1
+}
+
+function closeDetail() {
+  detailItemId.value = null
+}
+
+function clampZoom(z: number): number {
+  return Math.min(4, Math.max(0.25, z))
+}
+
+function bumpOriginalZoom(delta: number) {
+  detailZoomOriginal.value = clampZoom(detailZoomOriginal.value + delta)
+}
+
+function bumpResultZoom(delta: number) {
+  detailZoomResult.value = clampZoom(detailZoomResult.value + delta)
+}
+
+function onDetailKeydown(ev: KeyboardEvent) {
+  if (ev.key === 'Escape') closeDetail()
+}
+
+watch(detailItemId, (id) => {
+  if (id) {
+    window.addEventListener('keydown', onDetailKeydown)
+    document.body.style.overflow = 'hidden'
+  } else {
+    window.removeEventListener('keydown', onDetailKeydown)
+    document.body.style.overflow = ''
+  }
+})
+
+watch(
+  () => activeBatch.value?.id,
+  () => {
+    if (detailItemId.value && !detailItem.value) closeDetail()
+  },
+)
+
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onDeleteModalKeydown)
+  window.removeEventListener('keydown', onDetailKeydown)
   document.body.style.overflow = ''
+  closeDetail()
   if (uploadErrorTimer) {
     clearTimeout(uploadErrorTimer)
     uploadErrorTimer = null
@@ -526,30 +674,86 @@ onBeforeUnmount(() => {
                 <p class="hint">可多次添加；点击「提交焊缝检测」开始检测。</p>
               </div>
 
-              <div v-else class="grid">
-                <article v-for="item in activeBatch?.items" :key="item.id" class="card">
-                  <header class="card-head">
-                    <span class="card-name" :title="item.relativePath">{{ item.relativePath }}</span>
-                    <span class="badge" :data-status="item.status">{{ item.status }}</span>
-                  </header>
-                  <div class="pair">
-                    <figure>
-                      <figcaption>原图</figcaption>
-                      <div class="thumb">
-                        <img :src="item.originalUrl" :alt="item.name" />
-                      </div>
-                    </figure>
-                    <figure>
-                      <figcaption>分割结果</figcaption>
-                      <div class="thumb result">
-                        <img v-if="item.resultUrl" :src="item.resultUrl" alt="segmented" />
-                        <div v-else-if="item.status === 'running'" class="overlay">处理中…</div>
-                        <div v-else-if="item.status === 'error'" class="overlay err">{{ item.error }}</div>
-                        <div v-else class="overlay muted">等待</div>
-                      </div>
-                    </figure>
+              <div v-else class="result-list-wrap">
+                <table class="result-table" aria-label="检测结果列表">
+                  <thead>
+                    <tr>
+                      <th scope="col">文件名</th>
+                      <th scope="col">状态</th>
+                      <th scope="col" class="result-table-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in resultListVisibleItems" :key="item.id">
+                      <td class="result-table-name" :title="item.relativePath">{{ item.relativePath }}</td>
+                      <td>
+                        <span class="badge" :data-status="item.status">{{ statusLabel(item.status) }}</span>
+                      </td>
+                      <td class="result-table-actions">
+                        <button type="button" class="btn btn-sm" @click="openDetail(item.id)">查看详情</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <nav
+                  v-if="resultListUsePagination"
+                  class="result-pagination"
+                  aria-label="结果列表分页"
+                >
+                  <div class="result-pagination-info">
+                    第 <strong>{{ resultListPage }}</strong> / {{ resultListTotalPages }} 页，每页
+                    {{ RESULT_LIST_PAGE_SIZE }} 张，共 {{ resultListTotalCount }} 张
                   </div>
-                </article>
+                  <div class="result-pagination-row">
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="resultListPage <= 1"
+                      @click="goResultPrevPage"
+                    >
+                      上一页
+                    </button>
+                    <div
+                      v-if="resultListTotalPages <= 16"
+                      class="result-page-nums"
+                      role="navigation"
+                      aria-label="页码"
+                    >
+                      <button
+                        v-for="p in resultListPageNumbers"
+                        :key="p"
+                        type="button"
+                        class="btn btn-page"
+                        :class="{ 'btn-page--active': p === resultListPage }"
+                        :aria-current="p === resultListPage ? 'page' : undefined"
+                        @click="goResultPage(p)"
+                      >
+                        {{ p }}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="resultListPage >= resultListTotalPages"
+                      @click="goResultNextPage"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                  <div class="result-pagination-jump">
+                    <label class="result-pagination-jump-label" for="result-list-jump-dock">跳转到</label>
+                    <input
+                      id="result-list-jump-dock"
+                      v-model.number="resultListJumpDraft"
+                      class="result-pagination-jump-input"
+                      type="number"
+                      min="1"
+                      :max="resultListTotalPages"
+                      @keydown.enter.prevent="commitResultListJump"
+                    />
+                    <button type="button" class="btn btn-sm" @click="commitResultListJump">确定</button>
+                  </div>
+                </nav>
               </div>
             </template>
           </section>
@@ -641,30 +845,86 @@ onBeforeUnmount(() => {
                 </template>
               </div>
 
-              <div v-else class="grid">
-                <article v-for="item in activeBatch?.items" :key="item.id" class="card">
-                  <header class="card-head">
-                    <span class="card-name" :title="item.relativePath">{{ item.relativePath }}</span>
-                    <span class="badge" :data-status="item.status">{{ item.status }}</span>
-                  </header>
-                  <div class="pair">
-                    <figure>
-                      <figcaption>原图</figcaption>
-                      <div class="thumb">
-                        <img :src="item.originalUrl" :alt="item.name" />
-                      </div>
-                    </figure>
-                    <figure>
-                      <figcaption>分割结果</figcaption>
-                      <div class="thumb result">
-                        <img v-if="item.resultUrl" :src="item.resultUrl" alt="segmented" />
-                        <div v-else-if="item.status === 'running'" class="overlay">处理中…</div>
-                        <div v-else-if="item.status === 'error'" class="overlay err">{{ item.error }}</div>
-                        <div v-else class="overlay muted">等待</div>
-                      </div>
-                    </figure>
+              <div v-else class="result-list-wrap">
+                <table class="result-table" aria-label="检测结果列表">
+                  <thead>
+                    <tr>
+                      <th scope="col">文件名</th>
+                      <th scope="col">状态</th>
+                      <th scope="col" class="result-table-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in resultListVisibleItems" :key="item.id">
+                      <td class="result-table-name" :title="item.relativePath">{{ item.relativePath }}</td>
+                      <td>
+                        <span class="badge" :data-status="item.status">{{ statusLabel(item.status) }}</span>
+                      </td>
+                      <td class="result-table-actions">
+                        <button type="button" class="btn btn-sm" @click="openDetail(item.id)">查看详情</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <nav
+                  v-if="resultListUsePagination"
+                  class="result-pagination"
+                  aria-label="结果列表分页"
+                >
+                  <div class="result-pagination-info">
+                    第 <strong>{{ resultListPage }}</strong> / {{ resultListTotalPages }} 页，每页
+                    {{ RESULT_LIST_PAGE_SIZE }} 张，共 {{ resultListTotalCount }} 张
                   </div>
-                </article>
+                  <div class="result-pagination-row">
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="resultListPage <= 1"
+                      @click="goResultPrevPage"
+                    >
+                      上一页
+                    </button>
+                    <div
+                      v-if="resultListTotalPages <= 16"
+                      class="result-page-nums"
+                      role="navigation"
+                      aria-label="页码"
+                    >
+                      <button
+                        v-for="p in resultListPageNumbers"
+                        :key="p"
+                        type="button"
+                        class="btn btn-page"
+                        :class="{ 'btn-page--active': p === resultListPage }"
+                        :aria-current="p === resultListPage ? 'page' : undefined"
+                        @click="goResultPage(p)"
+                      >
+                        {{ p }}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :disabled="resultListPage >= resultListTotalPages"
+                      @click="goResultNextPage"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                  <div class="result-pagination-jump">
+                    <label class="result-pagination-jump-label" for="result-list-jump-float">跳转到</label>
+                    <input
+                      id="result-list-jump-float"
+                      v-model.number="resultListJumpDraft"
+                      class="result-pagination-jump-input"
+                      type="number"
+                      min="1"
+                      :max="resultListTotalPages"
+                      @keydown.enter.prevent="commitResultListJump"
+                    />
+                    <button type="button" class="btn btn-sm" @click="commitResultListJump">确定</button>
+                  </div>
+                </nav>
               </div>
             </section>
 
@@ -775,6 +1035,76 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="detailItem"
+      class="detail-drawer-overlay"
+      role="presentation"
+      @click.self="closeDetail"
+    >
+      <aside
+        class="detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-drawer-title"
+        @click.stop
+      >
+        <header class="detail-drawer-head">
+          <h2 id="detail-drawer-title" class="detail-drawer-title">{{ detailItem.relativePath }}</h2>
+          <button type="button" class="detail-drawer-close" aria-label="关闭" @click="closeDetail">
+            关闭
+          </button>
+        </header>
+        <div class="detail-drawer-body">
+          <section class="detail-zoom-section" aria-label="原图">
+            <div class="detail-zoom-head">
+              <h3 class="detail-zoom-label">原图</h3>
+              <div class="detail-zoom-tools">
+                <button type="button" class="btn btn-tiny" @click="bumpOriginalZoom(-0.25)">缩小</button>
+                <span class="detail-zoom-pct">{{ Math.round(detailZoomOriginal * 100) }}%</span>
+                <button type="button" class="btn btn-tiny" @click="bumpOriginalZoom(0.25)">放大</button>
+              </div>
+            </div>
+            <div class="detail-zoom-viewport">
+              <img
+                class="detail-zoom-img"
+                :src="detailItem.originalUrl"
+                :alt="detailItem.name"
+                :style="{ width: `${100 * detailZoomOriginal}%` }"
+              />
+            </div>
+          </section>
+          <section class="detail-zoom-section" aria-label="分割结果">
+            <div class="detail-zoom-head">
+              <h3 class="detail-zoom-label">分割结果</h3>
+              <div class="detail-zoom-tools">
+                <button type="button" class="btn btn-tiny" @click="bumpResultZoom(-0.25)">缩小</button>
+                <span class="detail-zoom-pct">{{ Math.round(detailZoomResult * 100) }}%</span>
+                <button type="button" class="btn btn-tiny" @click="bumpResultZoom(0.25)">放大</button>
+              </div>
+            </div>
+            <div class="detail-zoom-viewport">
+              <img
+                v-if="detailItem.resultUrl"
+                class="detail-zoom-img"
+                :src="detailItem.resultUrl"
+                alt="分割结果"
+                :style="{ width: `${100 * detailZoomResult}%` }"
+              />
+              <div v-else class="detail-result-placeholder">
+                <template v-if="detailItem.status === 'running'">处理中…</template>
+                <template v-else-if="detailItem.status === 'error'">
+                  <span class="detail-result-err">{{ detailItem.error }}</span>
+                </template>
+                <template v-else>暂无分割图（等待处理）</template>
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
     </div>
   </Teleport>
 </template>
@@ -1106,41 +1436,160 @@ onBeforeUnmount(() => {
   font-size: 0.9rem;
 }
 
-.scroll.scroll--dock .grid {
+.scroll.scroll--dock .result-list-wrap {
   width: 100%;
   max-width: 56rem;
   margin-left: auto;
   margin-right: auto;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 1rem;
-}
-
-.card {
-  border: 1px solid #2f2f35;
+.result-list-wrap {
+  width: 100%;
   border-radius: 12px;
+  border: 1px solid #2f2f35;
   background: #16161a;
   overflow: hidden;
 }
 
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.result-table th,
+.result-table td {
+  padding: 0.65rem 0.85rem;
+  text-align: left;
   border-bottom: 1px solid #2a2a30;
 }
 
-.card-name {
+.result-table th {
+  font-weight: 600;
   font-size: 0.78rem;
+  color: #9b9ba5;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #141418;
+}
+
+.result-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.result-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.result-table-name {
   color: #c8c8d2;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-word;
+  max-width: 0;
+  width: 55%;
+}
+
+.result-table-actions {
+  width: 8.5rem;
   white-space: nowrap;
+  vertical-align: middle;
+}
+
+.result-pagination {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  border-top: 1px solid #2a2a30;
+  background: #141418;
+}
+
+.result-pagination-info {
+  font-size: 0.8rem;
+  color: #9b9ba5;
+  line-height: 1.45;
+}
+
+.result-pagination-info strong {
+  color: #c8c8d2;
+  font-weight: 600;
+}
+
+.result-pagination-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.result-page-nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  max-width: 100%;
+}
+
+.btn-page {
+  min-width: 2rem;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.78rem;
+  border-radius: 6px;
+  border: 1px solid #3f3f4a;
+  background: #1f1f26;
+  color: #c4c4ce;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn-page:hover {
+  background: #2a2a32;
+}
+
+.btn-page--active {
+  background: #2a3148;
+  border-color: #4a6aad;
+  color: #dce6ff;
+  font-weight: 600;
+}
+
+.result-pagination-jump {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.result-pagination-jump-label {
+  color: #8e8e98;
+}
+
+.result-pagination-jump-input {
+  width: 4rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid #3f3f4a;
+  background: #0f0f12;
+  color: #ececf1;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.result-pagination-jump-input:focus {
+  outline: none;
+  border-color: #5b8cff;
+  box-shadow: 0 0 0 2px rgba(91, 140, 255, 0.2);
+}
+
+.btn-sm {
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
+  border-radius: 8px;
+}
+
+.btn-tiny {
+  padding: 0.28rem 0.5rem;
+  font-size: 0.75rem;
+  border-radius: 6px;
 }
 
 .badge {
@@ -1151,6 +1600,11 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: #2a2a32;
   color: #a8a8b3;
+}
+
+.badge[data-status='pending'] {
+  background: #2a2a32;
+  color: #9b9ba5;
 }
 
 .badge[data-status='done'] {
@@ -1168,57 +1622,149 @@ onBeforeUnmount(() => {
   color: #a8c4ff;
 }
 
-.pair {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
+.detail-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  display: flex;
+  justify-content: flex-end;
+  align-items: stretch;
 }
 
-figure {
+.detail-drawer {
+  width: min(100vw - 1rem, 520px);
+  max-width: 100%;
+  background: #1a1a1f;
+  border-left: 1px solid #3a3a42;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  animation: detail-drawer-in 0.22s ease-out;
+}
+
+@keyframes detail-drawer-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0.85;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.detail-drawer-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 1rem 1rem 0.85rem;
+  border-bottom: 1px solid #2f2f35;
+}
+
+.detail-drawer-title {
   margin: 0;
-  padding: 0.5rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #e2e2ea;
+  word-break: break-word;
 }
 
-figcaption {
+.detail-drawer-close {
+  flex-shrink: 0;
+  border: 1px solid #3f3f4a;
+  background: #2a2a32;
+  color: #ececf1;
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.detail-drawer-close:hover {
+  background: #34343e;
+}
+
+.detail-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.detail-zoom-section {
+  border: 1px solid #2f2f35;
+  border-radius: 10px;
+  background: #141418;
+  padding: 0.65rem 0.75rem 0.75rem;
+}
+
+.detail-zoom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.detail-zoom-label {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #9b9ba5;
+}
+
+.detail-zoom-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.detail-zoom-pct {
   font-size: 0.72rem;
   color: #8e8e98;
-  margin-bottom: 0.35rem;
+  min-width: 2.75rem;
+  text-align: center;
 }
 
-.thumb {
-  position: relative;
-  aspect-ratio: 1;
+.detail-zoom-viewport {
+  max-height: min(38vh, 320px);
+  overflow: auto;
   border-radius: 8px;
-  overflow: hidden;
   background: #0b0b0e;
   border: 1px solid #2a2a30;
 }
 
-.thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+.detail-zoom-img {
   display: block;
+  height: auto;
+  max-width: none;
 }
 
-.overlay {
-  position: absolute;
-  inset: 0;
+.detail-result-placeholder {
+  min-height: 8rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.85rem;
-  background: rgba(0, 0, 0, 0.45);
-}
-
-.overlay.muted {
+  padding: 1rem;
+  font-size: 0.88rem;
   color: #9b9ba5;
+  text-align: center;
 }
 
-.overlay.err {
+.detail-result-err {
   color: #ffb4b4;
-  padding: 0.5rem;
-  text-align: center;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
 .composer-slot {
